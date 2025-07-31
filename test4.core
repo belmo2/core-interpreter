@@ -1,0 +1,9 @@
+fact = \n . case n of
+  <1> -> 1 ;
+  <2> x -> n * (fact (n + -1))
+
+main = letrec fact = \n .
+                  case n of
+                    <1> -> 1 ;
+                    <2> x -> n * (fact (n + -1))
+        in fact 5
