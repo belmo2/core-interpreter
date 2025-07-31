@@ -13,6 +13,7 @@ import Control.Monad
 import Data.Functor.Identity (Identity)
 import Text.ParserCombinators.Parsec hiding (Parser)
 import Text.Parsec.Prim (ParsecT)
+import qualified Text.ParserCombinators.Parsec.Expr as Ex
 
 --- The Parser
 --- ----------
@@ -74,12 +75,36 @@ eParen = do _ <- symbol "("
 aexpr :: Parser Expr
 aexpr = try ePack <|> try eInt <|> try eVar <|> eParen
 
+--- ### Operator Table for Binary Expressions
+
+-- | Table of binary operators with precedence and associativity
+binOps :: [[Ex.Operator String () Identity Expr]]
+binOps =
+  [ [ Ex.Infix (return EAp) Ex.AssocLeft ]  -- Function application
+  , [ infixOp "*" Ex.AssocRight ]
+  , [ infixOp "/" Ex.AssocNone ]
+  , [ infixOp "+" Ex.AssocRight ]
+  , [ infixOp "-" Ex.AssocNone ]
+  , [ infixOp "==" Ex.AssocNone
+    , infixOp "~=" Ex.AssocNone
+    , infixOp ">"  Ex.AssocNone
+    , infixOp ">=" Ex.AssocNone
+    , infixOp "<"  Ex.AssocNone
+    , infixOp "<=" Ex.AssocNone
+    ]
+  , [ infixOp "&" Ex.AssocRight ]
+  , [ infixOp "|" Ex.AssocRight ]
+  ]
+  where
+    infixOp name assoc =
+      Ex.Infix (do { _ <- symbol name
+                   ; return (\x y -> EAp (EAp (EVar name) x) y) }) assoc
+
 --- ### Expressions
 
--- | Parses left-associative application expressions
+-- | Parses expressions with correct precedence and associativity
 expr :: Parser Expr
-expr = do es <- many1 aexpr
-          return $ foldl1 EAp es
+expr = Ex.buildExpressionParser binOps aexpr
 
 --- ### Top-Level Declarations
 
