@@ -7,37 +7,90 @@ import Types
 
 --- ### Evaluation Monad and Environment
 
--- | The evaluation monad to report runtime errors
 type Eval a = Either String a
+
+--- ### Value type and Environment
+
+type Env = M.HashMap Name Value
 
 --- ### Evaluator
 
--- | The evaluator function
--- Takes an expression and an environment, and evaluates it to a Value
-eval :: Expr -> Env -> Eval Value
-eval (ENum i) _ = return $ VInt i
+eval :: Expr -> Env -> Core -> Eval Value
 
-eval (EVar x) env =
+eval (ENum i) _ _ = return $ VInt i
+
+eval (EVar x) env core =
   case M.lookup x env of
     Just v  -> return v
-    Nothing -> Left $ "Unbound variable: " ++ x
+    Nothing ->
+      case M.lookup x core of
+        Just (_, params, body) ->
+          -- Treat supercombinators as global multi-arg closures!
+          return $ makeClosure params body env core
+        Nothing -> Left $ "Unbound variable: " ++ x
 
--- TODO:
--- - Implement EAp (function application)
--- - Implement ELet and ELet True (let and letrec)
--- - Implement ELam (lambdas)
--- - Implement EPack (constructors)
--- - Implement ECase (pattern matching)
+eval (ELam params body) env core =
+  case params of
+    [] -> Left "Lambda must have at least one parameter"
+    _  -> return $ makeClosure params body env core
+
+eval (EAp f x) env core = do
+  vf <- eval f env core
+  vx <- eval x env core
+  case vf of
+    VFun fun -> fun vx
+    _ -> Left "Trying to apply a non-function, wrong"
+
+-- Placeholders for remaining forms:
+eval (ELet isRec defs body) env core =
+  if not isRec
+    then do
+      env' <- foldM (\e (n, ex) -> eval ex env core >>= \v -> return $ M.insert n v e) env defs
+      eval body env' core
+    else
+      -- letrec: mutually recursive, using Haskell laziness
+      let env' = M.union (M.fromList [(n, unsafeEval ex env' core) | (n, ex) <- defs]) env
+      in eval body env' core
+  where
+    unsafeEval ex e c = case eval ex e c of
+                          Right v -> v
+                          Left err -> error err
+
+eval (EPack tag arity) env core =
+  -- This is a stub: in real Core, arguments will be passed via EAp (see ECase)
+  return $ VPack tag []
+
+eval (ECase expr alts) env core = do
+  v <- eval expr env core
+  case v of
+    VPack tag vs -> matchAlt tag vs alts
+    _ -> Left "Case on non-constructor"
+  where
+    matchAlt _ _ [] = Left "No matching case alternative, no soup for you."
+    matchAlt tag vs ((tag', params, rhs):rest)
+      | tag == tag' && length params == length vs =
+          let env' = M.union (M.fromList (zip params vs)) env
+          in eval rhs env' core
+      | otherwise = matchAlt tag vs rest
+
+--- ### Lambda/Closure Helper
+
+makeClosure :: [Name] -> Expr -> Env -> Core -> Value
+makeClosure [] body env _ = error "This Mission was Impossible: empty lambda"
+makeClosure (p:ps) body env core = VFun $ \arg ->
+  let env' = M.insert p arg env
+  in if null ps
+     then eval body env' core
+     else return $ makeClosure ps body env' core
 
 --- ### Top-Level Entry Point
 
--- | Use this function as your top-level entry point so you don't break `app/Main.hs`
 run :: Core -> String
 run prog =
   case M.lookup "main" prog of
     Nothing -> error "Supercombinator main not defined."
     Just (_, [], mainBody) ->
-      case eval mainBody M.empty of
+      case eval mainBody M.empty prog of
         Right (VInt n) -> show n
         Right _ -> error "Main did not return an integer."
         Left err -> error $ "Runtime error: " ++ err
