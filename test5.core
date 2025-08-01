@@ -1,2 +1,2 @@
-add = \a b . a + b
+add a b = a + b ;
 main = add 7 8

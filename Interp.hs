@@ -1,23 +1,23 @@
--- | Core language interpreter for CS421 project
--- Evaluates Core expressions using closures, environment maps, and tagged constructors.
--- Built-in primitive functions are available through `primEnv`.
-
 module Interp where
 
 import qualified Data.HashMap.Lazy as M
 import Types
 
---- ### Evaluation Monad and Environment
-
-type Eval a = Either String a
-
---- ### Value type and Environment
-
-type Env = M.HashMap Name Value
+import Control.Monad (foldM)  -- needed for the non-recursive let
 
 --- ### Evaluator
 
 eval :: Expr -> Env -> Core -> Eval Value
+
+-- Special lazy if: if cond thenExpr elseExpr to avoid the StackOverflow error
+eval (EAp (EAp (EAp (EVar "if") cond) thenE) elseE) env core = do
+  vc <- eval cond env core
+  case vc of
+    VInt c ->
+      if c /= 0
+        then eval thenE env core
+        else eval elseE env core
+    _ -> Left "Type error in if condition."
 
 eval (ENum i) _ _ = return $ VInt i
 
@@ -26,9 +26,9 @@ eval (EVar x) env core =
     Just v  -> return v
     Nothing ->
       case M.lookup x core of
-        Just (_, params, body) ->
-          -- Treat supercombinators as global multi-arg closures!
-          return $ makeClosure params body env core
+        Just (_, [], body) -> eval body env core
+          -- Treat supercombinators (Not the Earth Supercomputer) as global multi-arg closures!
+        Just (_, params, body) -> return $ makeClosure params body env core
         Nothing -> Left $ "Unbound variable: " ++ x
 
 eval (ELam params body) env core =
@@ -43,19 +43,25 @@ eval (EAp f x) env core = do
     VFun fun -> fun vx
     _ -> Left "Trying to apply a non-function."
 
-eval (ELet isRec defs body) env core =
-  if not isRec
-    then do
-      env' <- foldM (\e (n, ex) -> eval ex env core >>= \v -> return $ M.insert n v e) env defs
+eval (ELet isRec defs body) env core
+  | not isRec = do
+      env' <- foldM
+        (\e (n, ex) -> do
+            v <- eval ex e core
+            return $ M.insert n v e)
+        env
+        defs
       eval body env' core
-    else
-      -- letrec: mutually recursive, using Haskell laziness
-      let env' = M.union (M.fromList [(n, unsafeEval ex env' core) | (n, ex) <- defs]) env
+  | otherwise =
+      let env' = M.union recDefs env
+          recDefs = M.fromList
+            [ (n, val)
+            | (n, ex) <- defs
+            , let val = case eval ex env' core of
+                          Right v  -> v
+                          Left err -> error $ "letrec binding error for " ++ n ++ ": " ++ err
+            ]
       in eval body env' core
-  where
-    unsafeEval ex e c = case eval ex e c of
-                          Right v -> v
-                          Left err -> error err
 
 eval (EPack tag arity) _ _ =
   -- This is a stub: in real Core, arguments are added via EAp chains
@@ -67,12 +73,17 @@ eval (ECase expr alts) env core = do
     VPack tag vs -> matchAlt tag vs alts
     _ -> Left "Case on non-constructor."
   where
-    matchAlt _ _ [] = Left "No matching case alternative."
-    matchAlt tag vs ((tag', params, rhs):rest)
-      | tag == tag' && length params == length vs =
-          let env' = M.union (M.fromList (zip params vs)) env
+    matchAlt _ _ [] = Left "No matching case alternative.  No soup for you."
+    matchAlt tagVal vs ((tag', params, rhs):rest)
+      | tagVal == tag' && length params == length vs =
+          let pairs =
+                [ (p, val)
+                | (p, val) <- zip params vs
+                , p /= "_"  -- drop wildcards
+                ]
+              env' = M.union (M.fromList pairs) env
           in eval rhs env' core
-      | otherwise = matchAlt tag vs rest
+      | otherwise = matchAlt tagVal vs rest
 
 --- ### Lambda/Closure Helper
 
@@ -85,6 +96,13 @@ makeClosure (p:ps) body env core = VFun $ \arg ->
      else return $ makeClosure ps body env' core
 
 --- ### Primitive Operators
+
+-- | if cond thenVal elseVal  -- cond: integer (0=false, nonzero=true)
+ifPrim :: Value
+ifPrim = VFun $ \cond -> return $ VFun $ \thenV -> return $ VFun $ \elseV ->
+  case cond of
+    VInt c -> if c /= 0 then return thenV else return elseV
+    _ -> Left "Type error in if condition."
 
 primEnv :: Env
 primEnv = M.fromList
@@ -100,8 +118,8 @@ primEnv = M.fromList
   , ("<=", binIntPred (<=))
   , ("&", binBoolOp (&&))
   , ("|", binBoolOp (||))
+  , ("if", ifPrim)
   ]
-
 -- | Helper: curried binary int -> int
 binIntOp :: (Int -> Int -> Int) -> Value
 binIntOp op = VFun $ \v1 -> return $ VFun $ \v2 ->
